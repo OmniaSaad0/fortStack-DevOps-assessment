@@ -1,6 +1,6 @@
 Todo-List-nodejs/
 
-helm/argocd/git-credentials.yaml
+helm/argocd/git-credentials-secret.yaml
 
 helm/todo-app/
 
