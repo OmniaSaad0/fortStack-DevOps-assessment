@@ -1,0 +1,78 @@
+---
+# Application Deployment Tasks
+# This file handles application setup, Docker credentials, and auto-update configuration
+
+- name: Create application directory
+  file:
+    path: /opt/todo-app
+    state: directory
+    mode: '0755'
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+  become: true
+
+- name: Copy docker-compose.yml
+  copy:
+    src: "~/todo-list-app/deployment/docker-compose.yml"
+    dest: /opt/todo-app/docker-compose.yml
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+  become: true
+
+- name: Copy .env file
+  copy:
+    src: "~/todo-list-app/Todo-List-nodejs/.env"
+    dest: /opt/todo-app/.env
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+  become: true
+
+- name: Create Docker credentials directory
+  file:
+    path: /opt/todo-app/.docker
+    state: directory
+    mode: '0700'
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+  become: true
+
+- name: Create Docker config
+  template:
+    src: docker-config.json.j2
+    dest: /opt/todo-app/.docker/config.json
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0600'
+  become: true
+  when: docker_username is defined and docker_password is defined
+
+- name: Create auto-update script
+  template:
+    src: auto-update-image.sh.j2
+    dest: /opt/todo-app/auto-update-image.sh
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  become: true
+
+- name: Create auto-update log file
+  file:
+    path: /var/log/auto-update.log
+    state: touch
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0644'
+  become: true
+
+- name: Setup cron job for auto-update
+  cron:
+    name: "Detect and auto-update Docker image"
+    minute: "*/2"
+    job: "cd /opt/todo-app && ./auto-update-image.sh >> /var/log/auto-update.log 2>&1"
+    user: "{{ ansible_user }}"
+  become: true
+
+- name: Start the application
+  shell: "cd /opt/todo-app && docker compose up -d"
+  become: true
+  # become_user: "{{ ansible_user }}" 

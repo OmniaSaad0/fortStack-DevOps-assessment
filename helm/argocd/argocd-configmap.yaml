@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  application.instanceLabelKey: argocd.argoproj.io/instance
+  repositories: |
+    - url: https://github.com/OmniaSaad0/todo-app-manifests
+      name: todo-app-manifests
+      type: git
+      usernameSecret:
+        name: git-credentials
+        key: username
+      passwordSecret:
+        name: git-credentials
+        key: token
+  image-updater.argoproj.io.write-back-method: git 

@@ -1,0 +1,8 @@
+---
+- name: Install Kubernetes with kubeadm
+  hosts: k8s_cluster
+  become: true
+  vars:
+    k8s_version: "1.29.0"
+  roles:
+    - k8s-setup 

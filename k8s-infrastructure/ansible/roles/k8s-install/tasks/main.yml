@@ -1,0 +1,410 @@
+---
+# Follows the exact order from the article: https://bizanosa.com/install-kubernetes-with-kubeadm/
+
+- name: Update apt package index
+  apt:
+    update_cache: true
+
+- name: Install prerequisite packages
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gpg
+      - netplan.io
+    state: present
+
+# Configure static IPs for nodes
+- name: Configure static IP for control plane
+  copy:
+    content: |
+      network:
+        version: 2
+        ethernets:
+          eth0:
+            dhcp4: false
+            addresses:
+              - {{ control_plane_ip }}/24
+            gateway4: {{ gateway_ip }}
+            nameservers:
+              addresses: [8.8.8.8, 8.8.4.4]
+    dest: /etc/netplan/01-static-ip.yaml
+    mode: '0644'
+  when: node_role == 'control-plane'
+
+- name: Configure static IP for worker nodes
+  copy:
+    content: |
+      network:
+        version: 2
+        ethernets:
+          eth0:
+            dhcp4: false
+            addresses:
+              - {{ worker_ip }}/24
+            gateway4: {{ gateway_ip }}
+            nameservers:
+              addresses: [8.8.8.8, 8.8.4.4]
+    dest: /etc/netplan/01-static-ip.yaml
+    mode: '0644'
+  when: node_role == 'worker'
+
+- name: Apply netplan configuration
+  command: netplan apply
+  changed_when: false
+
+- name: Wait for network to be ready
+  wait_for:
+    host: "{{ ansible_default_ipv4.address }}"
+    port: 22
+    delay: 10
+    timeout: 60
+    
+# Step 1: Disable swap
+- name: Disable swap
+  command: swapoff -a
+  changed_when: false
+
+- name: Comment out swap in fstab
+  replace:
+    path: /etc/fstab
+    regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+    replace: '# \1'
+
+# Step 2: Add IP to /etc/hosts (this will be done manually as it's specific to each environment)
+- name: Display note about /etc/hosts
+  debug:
+    msg: "Please manually add your IP to /etc/hosts file with your hostname"
+
+# Step 3: Install container runtime prerequisites
+- name: Create k8s modules config
+  copy:
+    content: |
+      overlay
+      br_netfilter
+    dest: /etc/modules-load.d/k8s.conf
+    mode: '0644'
+
+- name: Load kernel modules
+  command: "modprobe {{ item }}"
+  loop:
+    - overlay
+    - br_netfilter
+  changed_when: false
+
+- name: Create sysctl config
+  copy:
+    content: |
+      net.bridge.bridge-nf-call-iptables = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward = 1
+    dest: /etc/sysctl.d/k8s.conf
+    mode: '0644'
+
+- name: Apply sysctl parameters
+  command: sysctl --system
+  changed_when: false
+
+- name: Verify kernel modules
+  shell: "{{ item }}"
+  register: module_check
+  changed_when: false
+  loop:
+    - "lsmod | grep br_netfilter"
+    - "lsmod | grep overlay"
+
+- name: Verify sysctl parameters
+  command: sysctl net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables net.ipv4.ip_forward
+  register: sysctl_check
+  changed_when: false
+
+# Step 4: Install Containerd
+- name: Create temp directory
+  file:
+    path: /tmp
+    state: directory
+
+- name: Download containerd
+  get_url:
+    url: https://github.com/containerd/containerd/releases/download/v1.7.23/containerd-1.7.23-linux-amd64.tar.gz
+    dest: /tmp/containerd-1.7.23-linux-amd64.tar.gz
+    mode: '0644'
+
+- name: Extract containerd
+  unarchive:
+    src: /tmp/containerd-1.7.23-linux-amd64.tar.gz
+    dest: /usr/local
+    remote_src: true
+
+- name: Download containerd service file
+  get_url:
+    url: https://raw.githubusercontent.com/containerd/containerd/main/containerd.service
+    dest: /usr/lib/systemd/system/containerd.service
+    mode: '0644'
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: true
+
+- name: Enable and start containerd
+  systemd:
+    name: containerd
+    state: started
+    enabled: true
+
+# Step 5: Install runc
+- name: Download runc
+  get_url:
+    url: https://github.com/opencontainers/runc/releases/download/v1.2.0/runc.amd64
+    dest: /tmp/runc.amd64
+    mode: '0755'
+
+- name: Install runc
+  copy:
+    src: /tmp/runc.amd64
+    dest: /usr/local/sbin/runc
+    mode: '0755'
+    remote_src: true
+
+# Step 6: Install CNI plugins
+- name: Download CNI plugins
+  get_url:
+    url: https://github.com/containernetworking/plugins/releases/download/v1.6.0/cni-plugins-linux-amd64-v1.6.0.tgz
+    dest: /tmp/cni-plugins-linux-amd64-v1.6.0.tgz
+    mode: '0644'
+
+- name: Create CNI bin directory
+  file:
+    path: /opt/cni/bin
+    state: directory
+    mode: '0755'
+
+- name: Extract CNI plugins
+  unarchive:
+    src: /tmp/cni-plugins-linux-amd64-v1.6.0.tgz
+    dest: /opt/cni/bin
+    remote_src: true
+
+# Step 7: Configure containerd systemd cgroup driver
+- name: Create containerd config directory
+  file:
+    path: /etc/containerd
+    state: directory
+    mode: '0755'
+
+- name: Generate containerd default config
+  command: containerd config default
+  register: containerd_config
+  changed_when: false
+
+- name: Create containerd config file
+  copy:
+    content: "{{ containerd_config.stdout }}"
+    dest: /etc/containerd/config.toml
+    mode: '0644'
+
+- name: Update containerd config for systemd cgroup
+  replace:
+    path: /etc/containerd/config.toml
+    regexp: 'SystemdCgroup = false'
+    replace: 'SystemdCgroup = true'
+
+- name: Restart containerd
+  systemd:
+    name: containerd
+    state: restarted
+
+# Step 8: Install kubeadm, kubelet and kubectl
+
+- name: Create apt keyrings directory
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Download Kubernetes GPG key
+  get_url:
+    url: https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key
+    dest: /tmp/kubernetes-apt-keyring.gpg
+    mode: '0644'
+    validate_certs: false
+
+- name: Remove existing GPG key file if exists
+  file:
+    path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    state: absent
+
+- name: Add Kubernetes GPG key
+  command: gpg --batch --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /tmp/kubernetes-apt-keyring.gpg
+  changed_when: false
+
+- name: Add Kubernetes repository
+  apt_repository:
+    repo: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /'
+    state: present
+    filename: kubernetes
+
+- name: Update apt cache
+  apt:
+    update_cache: true
+
+- name: Install Kubernetes components
+  apt:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+    state: present
+
+- name: Hold Kubernetes packages
+  dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+
+- name: Enable kubelet service
+  systemd:
+    name: kubelet
+    state: started
+    enabled: true
+
+# Step 9: Pull kubeadm images (Control Plane only)
+- name: Pull kubeadm images
+  command: kubeadm config images pull
+  when: node_role == 'control-plane'
+
+# Step 10: Initialize cluster (Control Plane only)
+- name: Check if Kubernetes is already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_admin_conf
+  when: node_role == 'control-plane'
+
+- name: Reset Kubernetes cluster if already initialized
+  command: kubeadm reset --force
+  when: node_role == 'control-plane' and k8s_admin_conf.stat.exists
+  changed_when: false
+
+- name: Initialize Kubernetes cluster
+  command: kubeadm init --apiserver-advertise-address={{ control_plane_ip }} --pod-network-cidr={{ pod_network_cidr }}
+  register: kubeadm_init
+  changed_when: kubeadm_init.rc == 0
+  when: node_role == 'control-plane'
+
+# Step 11: Setup kubectl for ubuntu user (Control Plane only)
+- name: Create .kube directory
+  file:
+    path: /home/ubuntu/.kube
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: '0755'
+  when: node_role == 'control-plane'
+
+- name: Copy admin.conf to user's kube config
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/ubuntu/.kube/config
+    remote_src: true
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+  when: node_role == 'control-plane'
+
+# Step 12: Install Calico CNI (Control Plane only)
+- name: Install Calico operator
+  command: kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/tigera-operator.yaml
+  become_user: ubuntu
+  changed_when: false
+  when: node_role == 'control-plane'
+
+- name: Wait for Calico operator to be ready
+  command: kubectl wait --for=condition=ready pod -l name=tigera-operator -n tigera-operator --timeout=300s
+  become_user: ubuntu
+  changed_when: false
+  when: node_role == 'control-plane'
+
+- name: Create Calico installation manifest
+  copy:
+    content: |
+      apiVersion: operator.tigera.io/v1
+      kind: Installation
+      metadata:
+        name: default
+      spec:
+        calicoNetwork:
+          ipPools:
+          - blockSize: 26
+            cidr: {{ pod_network_cidr }}
+            encapsulation: VXLANCrossSubnet
+            name: default-ipv4-ippool
+            natOutgoing: Enabled
+            nodeSelector: all()
+    dest: /tmp/calico-installation.yaml
+    mode: '0644'
+  when: node_role == 'control-plane'
+
+- name: Apply Calico installation
+  command: kubectl create -f /tmp/calico-installation.yaml
+  become_user: ubuntu
+  changed_when: false
+  when: node_role == 'control-plane'
+
+- name: Wait for Calico pods to be ready
+  command: kubectl wait --for=condition=ready pod -l k8s-app=calico-node -n kube-system --timeout=300s
+  become_user: ubuntu
+  changed_when: false
+  when: node_role == 'control-plane'
+
+- name: Remove not-ready taint from nodes
+  command: kubectl taint nodes --all node.kubernetes.io/not-ready-
+  become_user: ubuntu
+  changed_when: false
+  when: node_role == 'control-plane'
+
+- name: Wait for nodes to be ready
+  command: kubectl wait --for=condition=ready nodes --all --timeout=300s
+  become_user: ubuntu
+  changed_when: false
+  when: node_role == 'control-plane'
+
+# Step 13: Get join command (Control Plane only)
+- name: Get join command
+  command: kubeadm token create --print-join-command
+  register: join_command
+  changed_when: false
+  when: node_role == 'control-plane'
+
+- name: Save join command
+  copy:
+    content: "{{ join_command.stdout }}"
+    dest: /home/ubuntu/join-command.txt
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+  when: node_role == 'control-plane'
+
+# Step 14: Join cluster (Worker nodes only)
+- name: Join cluster
+  command: "{{ hostvars[groups['control_plane'][0]]['join_command']['stdout'] }}"
+  register: join_result
+  changed_when: join_result.rc == 0
+  when: node_role == 'worker'
+
+# Step 15: Show cluster status (Control Plane only)
+- name: Show cluster status
+  command: kubectl get nodes
+  become_user: ubuntu
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  register: cluster_status
+  changed_when: false
+  when: node_role == 'control-plane'
+
+- name: Display cluster status
+  debug:
+    msg: "{{ cluster_status.stdout_lines }}"
+  when: node_role == 'control-plane' 

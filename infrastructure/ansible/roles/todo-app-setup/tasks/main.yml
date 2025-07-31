@@ -1,0 +1,16 @@
+---
+# Main task file - includes all task modules
+- name: Include system setup tasks
+  include_tasks: system-setup.yml
+
+- name: Include Docker installation tasks
+  include_tasks: docker-setup.yml
+
+# - name: Include Kubernetes setup tasks
+#   include_tasks: kubernetes-setup.yml
+
+- name: Include application deployment tasks
+  include_tasks: app-deployment.yml
+
+- name: Include security and monitoring tasks
+  include_tasks: security-monitoring.yml 

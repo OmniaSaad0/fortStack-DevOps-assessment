@@ -1,0 +1,280 @@
+---
+# Follows the exact steps from Installation_Instruction.md
+
+# Step 1: Download and install kubectl
+- name: Download kubectl
+  get_url:
+    url: "https://dl.k8s.io/release/v{{ k8s_version }}/bin/linux/amd64/kubectl"
+    dest: /tmp/kubectl
+    mode: '0755'
+
+- name: Download kubectl checksum
+  get_url:
+    url: "https://dl.k8s.io/release/v{{ k8s_version }}/bin/linux/amd64/kubectl.sha256"
+    dest: /tmp/kubectl.sha256
+    mode: '0644'
+
+- name: Verify kubectl checksum
+  command: "echo \"$(cat /tmp/kubectl.sha256)  /tmp/kubectl\" | sha256sum --check"
+  changed_when: false
+
+- name: Install kubectl
+  copy:
+    src: /tmp/kubectl
+    dest: /usr/local/bin/kubectl
+    mode: '0755'
+    remote_src: true
+
+- name: Create local bin directory
+  file:
+    path: /home/ubuntu/.local/bin
+    state: directory
+    mode: '0755'
+    owner: ubuntu
+    group: ubuntu
+
+- name: Move kubectl to local bin
+  copy:
+    src: /tmp/kubectl
+    dest: /home/ubuntu/.local/bin/kubectl
+    mode: '0755'
+    remote_src: true
+    owner: ubuntu
+    group: ubuntu
+
+- name: Check kubectl version
+  command: kubectl version --client
+  changed_when: false
+
+# Step 2: Disable swap
+- name: Disable swap
+  command: swapoff -a
+  changed_when: false
+
+# Step 3: Create modules config
+- name: Create k8s modules config
+  copy:
+    content: |
+      overlay
+      br_netfilter
+    dest: /etc/modules-load.d/k8s.conf
+    mode: '0644'
+
+- name: Load kernel modules
+  command: "modprobe {{ item }}"
+  loop:
+    - overlay
+    - br_netfilter
+  changed_when: false
+
+# Step 4: Configure sysctl parameters
+- name: Create sysctl config
+  copy:
+    content: |
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward                 = 1
+    dest: /etc/sysctl.d/k8s.conf
+    mode: '0644'
+
+- name: Apply sysctl parameters
+  command: sysctl --system
+  changed_when: false
+
+# Step 5: Install CRI-O Runtime
+- name: Update apt cache
+  apt:
+    update_cache: true
+
+- name: Install prerequisite packages
+  apt:
+    name:
+      - software-properties-common
+      - curl
+      - apt-transport-https
+      - ca-certificates
+      - gpg
+    state: present
+
+- name: Create apt keyrings directory
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Download CRI-O GPG key
+  get_url:
+    url: https://pkgs.k8s.io/addons:/cri-o:/prerelease:/main/deb/Release.key
+    dest: /tmp/cri-o-apt-keyring.gpg
+    mode: '0644'
+
+- name: Remove existing CRI-O GPG key if exists
+  file:
+    path: /etc/apt/keyrings/cri-o-apt-keyring.gpg
+    state: absent
+
+- name: Add CRI-O GPG key
+  command: gpg --batch --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg /tmp/cri-o-apt-keyring.gpg
+  changed_when: false
+
+- name: Add CRI-O repository
+  apt_repository:
+    repo: 'deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://pkgs.k8s.io/addons:/cri-o:/prerelease:/main/deb/ /'
+    state: present
+    filename: cri-o
+
+- name: Update apt cache
+  apt:
+    update_cache: true
+
+- name: Install CRI-O
+  apt:
+    name: cri-o
+    state: present
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: true
+
+- name: Enable and start CRI-O
+  systemd:
+    name: crio
+    state: started
+    enabled: true
+
+# Step 6: Install Kubernetes components
+- name: Download Kubernetes GPG key
+  get_url:
+    url: https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key
+    dest: /tmp/kubernetes-apt-keyring.gpg
+    mode: '0644'
+
+- name: Remove existing Kubernetes GPG key if exists
+  file:
+    path: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    state: absent
+
+- name: Add Kubernetes GPG key
+  command: gpg --batch --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /tmp/kubernetes-apt-keyring.gpg
+  changed_when: false
+
+- name: Add Kubernetes repository
+  apt_repository:
+    repo: 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /'
+    state: present
+    filename: kubernetes
+
+- name: Update apt cache
+  apt:
+    update_cache: true
+
+- name: Install Kubernetes components
+  apt:
+    name:
+      - "kubelet={{ k8s_version }}-*"
+      - "kubectl={{ k8s_version }}-*"
+      - "kubeadm={{ k8s_version }}-*"
+      - jq
+    state: present
+
+- name: Enable and start kubelet
+  systemd:
+    name: kubelet
+    state: started
+    enabled: true
+
+# Step 7: Master node specific tasks
+- name: Check if Kubernetes is already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_admin_conf
+  when: node_role == 'master'
+
+- name: Pull kubeadm images (Master only)
+  command: kubeadm config images pull
+  when: node_role == 'master'
+
+- name: Initialize Kubernetes cluster (Master only)
+  command: kubeadm init
+  register: kubeadm_init
+  changed_when: kubeadm_init.rc == 0
+  when: node_role == 'master' and not k8s_admin_conf.stat.exists
+
+- name: Create .kube directory (Master only)
+  file:
+    path: /home/ubuntu/.kube
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: '0755'
+  when: node_role == 'master'
+
+- name: Copy admin.conf (Master only)
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/ubuntu/.kube/config
+    remote_src: true
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+  when: node_role == 'master'
+
+- name: Check if Calico is already installed
+  command: kubectl get pods -n kube-system -l k8s-app=calico-node
+  register: calico_check
+  changed_when: false
+  failed_when: false
+  when: node_role == 'master'
+
+- name: Install Calico CNI (Master only)
+  command: kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/calico.yaml
+  become_user: ubuntu
+  changed_when: false
+  when: node_role == 'master' and calico_check.rc != 0
+
+- name: Get join command (Master only)
+  command: kubeadm token create --print-join-command
+  register: join_command
+  changed_when: false
+  when: node_role == 'master'
+
+- name: Save join command (Master only)
+  copy:
+    content: "{{ join_command.stdout }}"
+    dest: /home/ubuntu/join-command.txt
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'
+  when: node_role == 'master'
+
+# Step 8: Worker node specific tasks
+- name: Check if worker is already joined
+  stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: k8s_kubelet_conf
+  when: node_role == 'worker'
+
+- name: Reset kubeadm (Worker only)
+  command: kubeadm reset --force
+  changed_when: false
+  when: node_role == 'worker' and k8s_kubelet_conf.stat.exists
+
+- name: Join cluster (Worker only)
+  command: "{{ hostvars[groups['master'][0]]['join_command']['stdout'] }} --v=5"
+  register: join_result
+  changed_when: join_result.rc == 0
+  when: node_role == 'worker' and hostvars[groups['master'][0]]['join_command'] is defined and not k8s_kubelet_conf.stat.exists
+
+# Step 9: Show cluster status (Master only)
+- name: Show cluster status
+  command: kubectl get nodes
+  become_user: ubuntu
+  delegate_to: "{{ groups['master'][0] }}"
+  register: cluster_status
+  changed_when: false
+  when: node_role == 'master'
+
+- name: Display cluster status
+  debug:
+    msg: "{{ cluster_status.stdout_lines }}"
+  when: node_role == 'master' 

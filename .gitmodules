@@ -1,0 +1,7 @@
+
+[submodule "Todo-List-nodejs"]
+	path = Todo-List-nodejs
+	url = https://github.com/OmniaSaad0/Todo-List-nodejs
+[submodule "helm/todo-app-manifests"]
+	path = helm/todo-app-manifests
+	url = https://github.com/OmniaSaad0/todo-app-manifests

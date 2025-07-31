@@ -1,0 +1,19 @@
+---
+# Security and Monitoring Tasks
+# This file handles firewall configuration and security settings
+
+- name: Allow SSH port
+  shell: "iptables -A INPUT -p tcp --dport 22 -j ACCEPT"
+  become: yes
+
+- name: Allow application port
+  shell: "iptables -A INPUT -p tcp --dport 4000 -j ACCEPT"
+  become: yes
+
+- name: Allow MongoDB port
+  shell: "iptables -A INPUT -p tcp --dport 27017 -j ACCEPT"
+  become: yes
+
+- name: Save iptables rules
+  shell: "iptables-save > /etc/iptables/rules.v4"
+  become: yes 
